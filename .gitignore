@@ -4,3 +4,4 @@ uploads/videos/*
 uploads/images/*
 uploads/avatars/*
 !uploads/.gitkeep
+.env
