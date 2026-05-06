@@ -1,31 +1,46 @@
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 const { User } = require('../models');
+const twilio = require('twilio');
 
-const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
+const getVerifyClient = () => {
+  return twilio(
+    process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_AUTH_TOKEN
+  ).verify.v2.services(process.env.TWILIO_VERIFY_SID);
+};
 
-const generateToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN });
+const generateToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN,
+  });
 
 // إرسال OTP
 exports.sendOTP = async (req, res) => {
   try {
     const { phone } = req.body;
-    if (!phone) return res.status(400).json({ success: false, message: 'رقم الهاتف مطلوب' });
+    if (!phone)
+      return res.status(400).json({ success: false, message: 'رقم الهاتف مطلوب' });
 
-    const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    await getVerifyClient().verifications.create({
+      to: phone,
+      channel: 'sms',
+    });
 
     let user = await User.findOne({ where: { phone } });
     if (!user) {
-      user = await User.create({ phone, otp, otpExpiry, username: `user_${Date.now()}` });
-    } else {
-      await user.update({ otp, otpExpiry });
+      user = await User.create({
+        phone,
+        username: `user_${Date.now()}`,
+      });
     }
 
-    console.log(`📱 OTP لـ ${phone}: ${otp}`);
-
-    return res.json({ success: true, message: 'تم إرسال الرمز', data: { phone } });
+    return res.json({
+      success: true,
+      message: 'تم إرسال الرمز',
+      data: { phone },
+    });
   } catch (err) {
+    console.error('sendOTP error:', err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -34,23 +49,47 @@ exports.sendOTP = async (req, res) => {
 exports.verifyOTP = async (req, res) => {
   try {
     const { phone, otp } = req.body;
-    const user = await User.findOne({ where: { phone } });
 
-    if (!user) return res.status(404).json({ success: false, message: 'المستخدم غير موجود' });
-    if (user.otp !== otp) return res.status(400).json({ success: false, message: 'رمز خاطئ' });
-    if (new Date() > user.otpExpiry) return res.status(400).json({ success: false, message: 'الرمز منتهي' });
+    const result = await getVerifyClient().verificationChecks.create({
+      to: phone,
+      code: otp,
+    });
 
-    const isNew = !user.isVerified;
-    await user.update({ isVerified: true, otp: null, otpExpiry: null, lastSeen: new Date() });
+    if (result.status !== 'approved') {
+      return res.status(400).json({ success: false, message: 'رمز خاطئ' });
+    }
 
+    let user = await User.findOne({ where: { phone } });
+    if (!user) {
+      user = await User.create({
+        phone,
+        username: `user_${Date.now()}`,
+        isVerified: true,
+      });
+    } else {
+      await user.update({ isVerified: true, lastSeen: new Date() });
+    }
+
+    const isNew = !user.fullName;
     const token = generateToken(user.id);
 
     return res.json({
       success: true,
       message: 'تم تسجيل الدخول',
-      data: { token, user: { id: user.id, phone: user.phone, username: user.username, avatar: user.avatar, isNew } }
+      token,
+      data: {
+        token,
+        user: {
+          id: user.id,
+          phone: user.phone,
+          username: user.username,
+          avatar: user.avatar,
+          isNew,
+        },
+      },
     });
   } catch (err) {
+    console.error('verifyOTP error:', err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -58,16 +97,25 @@ exports.verifyOTP = async (req, res) => {
 // إكمال الملف الشخصي
 exports.completeProfile = async (req, res) => {
   try {
-    const { username, fullName, language, country } = req.body;
+    const { username, fullName, language, country, interests } = req.body;
 
-    const exists = await User.findOne({ where: { username } });
-    if (exists && exists.id !== req.user.id) {
-      return res.status(400).json({ success: false, message: 'اسم المستخدم محجوز' });
+    if (username) {
+      const exists = await User.findOne({ where: { username } });
+      if (exists && exists.id !== req.user.id) {
+        return res.status(400).json({
+          success: false,
+          message: 'اسم المستخدم محجوز',
+        });
+      }
     }
 
-    await req.user.update({ username, fullName, language, country });
+    await req.user.update({ username, fullName, language, country, interests });
 
-    return res.json({ success: true, message: 'تم تحديث الملف', data: { user: req.user } });
+    return res.json({
+      success: true,
+      message: 'تم تحديث الملف',
+      data: { user: req.user },
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
