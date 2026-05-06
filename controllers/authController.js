@@ -1,13 +1,5 @@
 const jwt = require('jsonwebtoken');
 const { User } = require('../models');
-const twilio = require('twilio');
-
-const getVerifyClient = () => {
-  return twilio(
-    process.env.TWILIO_ACCOUNT_SID,
-    process.env.TWILIO_AUTH_TOKEN
-  ).verify.v2.services(process.env.TWILIO_VERIFY_SID);
-};
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -21,11 +13,6 @@ exports.sendOTP = async (req, res) => {
     if (!phone)
       return res.status(400).json({ success: false, message: 'رقم الهاتف مطلوب' });
 
-    await getVerifyClient().verifications.create({
-      to: phone,
-      channel: 'sms',
-    });
-
     let user = await User.findOne({ where: { phone } });
     if (!user) {
       user = await User.create({
@@ -33,6 +20,10 @@ exports.sendOTP = async (req, res) => {
         username: `user_${Date.now()}`,
       });
     }
+
+    await user.update({ otp: '123456', otpExpiry: new Date(Date.now() + 10 * 60 * 1000) });
+
+    console.log(`📱 OTP لـ ${phone}: 123456`);
 
     return res.json({
       success: true,
@@ -50,25 +41,17 @@ exports.verifyOTP = async (req, res) => {
   try {
     const { phone, otp } = req.body;
 
-    const result = await getVerifyClient().verificationChecks.create({
-      to: phone,
-      code: otp,
-    });
+    const user = await User.findOne({ where: { phone } });
+    if (!user)
+      return res.status(404).json({ success: false, message: 'المستخدم غير موجود' });
 
-    if (result.status !== 'approved') {
+    if (user.otp !== otp)
       return res.status(400).json({ success: false, message: 'رمز خاطئ' });
-    }
 
-    let user = await User.findOne({ where: { phone } });
-    if (!user) {
-      user = await User.create({
-        phone,
-        username: `user_${Date.now()}`,
-        isVerified: true,
-      });
-    } else {
-      await user.update({ isVerified: true, lastSeen: new Date() });
-    }
+    if (new Date() > user.otpExpiry)
+      return res.status(400).json({ success: false, message: 'الرمز منتهي' });
+
+    await user.update({ isVerified: true, otp: null, otpExpiry: null, lastSeen: new Date() });
 
     const isNew = !user.fullName;
     const token = generateToken(user.id);
